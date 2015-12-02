@@ -26,6 +26,12 @@ pub struct Window {
     t: String,
     /// The input scheme
     file: File,
+    /// Window title resource
+    title_: File,
+    /// Window content resource
+    content: File,
+    /// Window events resource
+    events: File,
     /// Font file
     font: Vec<u8>,
     /// Window data
@@ -40,17 +46,36 @@ impl Window {
             font_file.read_to_end(&mut font);
         }
 
+        // TODO: make this sane
         match File::open(&format!("orbital:///{}/{}/{}/{}/{}", x, y, w, h, title)) {
-            Some(file) => Some(box Window {
-                x: x,
-                y: y,
-                w: w,
-                h: h,
-                t: title.to_string(),
-                file: file,
-                font: font,
-                data: vec![0; w * h * 4],
-            }),
+            Some(file) => {
+                let window_path = file.path().unwrap();
+                let _title = &format!("{}title", window_path);
+                let _content = &format!("{}content", window_path);
+                let _events = &format!("{}events", window_path);
+                let title_file = File::open(_title);
+                let content_file = File::open(_content);
+                let events_file = File::open(_events);
+                if title_file.is_some() && 
+                   content_file.is_some() &&
+                   events_file.is_some() {
+                    Some(box Window {
+                        x: x,
+                        y: y,
+                        w: w,
+                        h: h,
+                        t: title.to_string(),
+                        file: file,
+                        title_: title_file.unwrap(),
+                        content: content_file.unwrap(),
+                        events: events_file.unwrap(),
+                        font: font,
+                        data: vec![0; w * h * 4],
+                    })
+                } else {
+                    None
+                }
+            },
             None => None
         }
     }
@@ -103,8 +128,9 @@ impl Window {
     }
 
     /// Set title
-    pub fn set_title(&mut self, _: &str) {
-        //TODO
+    pub fn set_title(&mut self, title: &str) {
+        self.t = String::new() + title;
+        self.title_.write(title.as_bytes());
     }
 
     /// Draw a pixel
@@ -178,7 +204,7 @@ impl Window {
         let mut event = Event::new();
         let event_ptr: *mut Event = &mut event;
         loop {
-            match self.file.read(&mut unsafe {
+            match self.events.read(&mut unsafe {
                 slice::from_raw_parts_mut(event_ptr as *mut u8, mem::size_of::<Event>())
             }) {
                 Some(0) => unsafe { sys_yield() },
@@ -190,11 +216,11 @@ impl Window {
 
     /// Flip the window buffer
     pub fn sync(&mut self) -> bool {
-        self.file.seek(SeekFrom::Start(0));
-        self.file.write(& unsafe {
+        self.content.seek(SeekFrom::Start(0));
+        self.content.write(& unsafe {
             slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * mem::size_of::<u32>())
         });
-        return self.file.sync();
+        return self.content.sync();
     }
 
     /// Return a iterator over events

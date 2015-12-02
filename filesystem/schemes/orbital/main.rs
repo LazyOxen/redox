@@ -1,103 +1,89 @@
 use std::{Box, String, Url};
 use std::{cmp, mem, ptr};
+use std::cell::UnsafeCell;
+use std::collections::BTreeMap;
 use std::get_slice::GetSlice;
 use std::io::*;
-use std::process::Command;
 use std::ops::DerefMut;
+use std::process::Command;
+use std::rc::Rc;
 use std::to_num::ToNum;
+use std::u64;//::{MAX};
 
 use orbital::event::Event;
 use orbital::Point;
 use orbital::Size;
 
-use self::display::Display;
 use self::session::Session;
 use self::window::Window;
+use self::resources::*;
 
 pub mod display;
 pub mod package;
+pub mod resources;
 pub mod scheduler;
 pub mod session;
 pub mod window;
 
 pub static mut session_ptr: *mut Session = 0 as *mut Session;
 
-/// A window resource
+/// A resource
 pub struct Resource {
-    /// The window
-    pub window: Box<Window>,
-    /// Seek point
-    pub seek: usize,
+    pub resource: Rc<UnsafeCell<Box<OrbitalResource>>>,
 }
 
 impl Resource {
+    pub fn new (resource: Rc<UnsafeCell<Box<OrbitalResource>>>) -> Box<Self> {
+        box Resource { 
+            resource: resource,
+        }
+    }
+
     pub fn dup(&self) -> Option<Box<Resource>> {
-        Some(box Resource {
-            window: Window::new(self.window.point,
-                                self.window.size,
-                                self.window.title.clone()),
-            seek: self.seek,
-        })
-    }
-
-    /// Return the url of this resource
-    pub fn path(&self) -> Option<String> {
-        Some(format!("orbital:///{}/{}/{}/{}/{}",
-                     self.window.point.x,
-                     self.window.point.y,
-                     self.window.size.width,
-                     self.window.size.height,
-                     self.window.title))
-    }
-
-    /// Read data to buffer
-    pub fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
-        // Read events from window
-        let mut i = 0;
-        while buf.len() - i >= mem::size_of::<Event>() {
-            match self.window.poll() {
-                Some(event) => {
-                    unsafe { ptr::write(buf.as_ptr().offset(i as isize) as *mut Event, event) };
-                    i += mem::size_of::<Event>();
-                }
-                None => break,
+        unsafe {
+            match (*self.resource.get()).dup() {
+                Some(r) => {
+                    Some(box Resource {
+                            resource: Rc::new(UnsafeCell::new(r)),
+                           })
+                },
+                None => None
             }
         }
+    }
 
-        Some(i)
+    pub fn path(&self) -> Option<String> {
+        unsafe {
+            (*self.resource.get()).path()
+        }
+    }
+
+    /// Read from resource
+    pub fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+        unsafe {
+            (*self.resource.get()).read(buf)
+        }
     }
 
     /// Write to resource
     pub fn write(&mut self, buf: &[u8]) -> Option<usize> {
-        let content = &mut self.window.content;
-
-        let size = cmp::min(content.size - self.seek, buf.len());
         unsafe {
-            Display::copy_run(buf.as_ptr() as usize, content.offscreen + self.seek, size);
+            (*self.resource.get()).write(buf)
         }
-        self.seek += size;
-
-        return Some(size);
     }
 
     /// Seek
     pub fn seek(&mut self, pos: SeekFrom) -> Option<usize> {
-        let end = self.window.content.size;
-
-        self.seek = match pos {
-            SeekFrom::Start(offset) => cmp::min(end, cmp::max(0, offset)),
-            SeekFrom::Current(offset) =>
-                cmp::min(end, cmp::max(0, self.seek as isize + offset) as usize),
-            SeekFrom::End(offset) => cmp::min(end, cmp::max(0, end as isize + offset) as usize),
-        };
-
-        return Some(self.seek);
+        unsafe {
+            (*self.resource.get()).seek(pos)
+        }
     }
 
     /// Sync the resource, should flip
     pub fn sync(&mut self) -> bool {
-        self.window.redraw();
-        true
+        unsafe {
+            (*self.resource.get()).sync()
+        }
     }
 }
 
@@ -106,9 +92,21 @@ pub struct Scheme {
     pub session: Box<Session>,
     pub next_x: isize,
     pub next_y: isize,
+    pub next_window_id: u64,
+    pub windows: BTreeMap<u64, Rc<UnsafeCell<Box<OrbitalResource>>>>,
 }
 
 impl Scheme {
+    fn next_id(&mut self) -> Option<u64> {
+        if self.next_window_id == u64::MAX {
+            None
+        } else {
+            let id = self.next_window_id;
+            self.next_window_id += 1;
+            Some(id)
+        }
+    }
+
     pub fn new() -> Box<Scheme> {
         println!("- Starting Orbital");
         println!("    Console: Press F1");
@@ -117,6 +115,8 @@ impl Scheme {
             session: Session::new(),
             next_x: 0,
             next_y: 0,
+            next_window_id: 1,
+            windows: BTreeMap::new(),
         };
         unsafe { session_ptr = ret.session.deref_mut() };
         ret
@@ -170,12 +170,19 @@ impl Scheme {
                 pointy = self.next_y;
             }
 
-            Some(box Resource {
-                window: Window::new(Point::new(pointx, pointy),
-                                    Size::new(size_width, size_height),
-                                    title),
-                seek: 0,
-            })
+            match self.next_id() {
+                Some(id) => {
+                    let window = Rc::new(UnsafeCell::new(WindowResource::new(
+                                                                             Point::new(pointx, pointy),
+                                                                             Size::new(size_width, size_height),
+                                                                             title, 
+                                                                             id)));
+                    self.windows.insert(id, window.clone());
+                    let resource = box Resource { resource: window };
+                    Some(resource)
+                },
+                None => None,
+            }
         } else if host == "launch" {
             let path = url.path();
 
@@ -205,6 +212,27 @@ impl Scheme {
             }
 
             None
+        } else if let Ok(id) = host.parse::<u64>() {
+            let window = self.windows[&id].clone();
+            let path = url.path_parts();
+            if let Some(property) = path.get(0) {
+                unsafe {
+                    match &property[..] {
+                        "content" => Some(Resource::new(
+                                (*(window.get() as *mut Box<WindowResource>))
+                                    .content.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>)),
+                        "title" => Some(Resource::new(
+                                (*(window.get() as *mut Box<WindowResource>))
+                                    .title.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>)),
+                        "events" => Some(Resource::new(
+                                (*(window.get() as *mut Box<WindowResource>))
+                                    .events.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>)),
+                        _ => None
+                    }
+                }
+            } else {
+                Some(Resource::new(window))
+            }
         } else {
             None
         }

@@ -1,4 +1,4 @@
-use std::{Box, String, Url};
+use std::{Box, String};
 use std::{cmp, mem, ptr};
 use std::cell::UnsafeCell;
 use std::io::*;
@@ -51,9 +51,7 @@ pub struct ContentResource {
 impl OrbitalResource for ContentResource {
     /// Return the url of this resource
     fn path(&self) -> Option<String> {
-        unsafe {
-            Some(format!("orbital://{}/content", self.id))
-        }
+        Some(format!("orbital://{}/content", self.id))
     }
 
     /// Read from resource
@@ -107,9 +105,7 @@ pub struct TitleResource {
 
 impl OrbitalResource for TitleResource {
     fn path(&self) -> Option<String> {
-        unsafe {
-            Some(format!("orbital://{}/title",self.id))
-        }
+        Some(format!("orbital://{}/title",self.id))
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
@@ -153,7 +149,7 @@ impl OrbitalResource for EventResource {
             while buf.len() - i >= mem::size_of::<Event>() {
                 match (*self.window_ptr).poll() {
                     Some(event) => {
-                        unsafe { ptr::write(buf.as_ptr().offset(i as isize) as *mut Event, event) };
+                        ptr::write(buf.as_ptr().offset(i as isize) as *mut Event, event);
                         i += mem::size_of::<Event>();
                     }
                     None => break,
@@ -164,11 +160,49 @@ impl OrbitalResource for EventResource {
     }
 }
 
+pub struct DimensionResource {
+    pub window_ptr: *mut Window,
+    // TODO: see if there's a nice way to not have to store the id
+    pub id: u64,
+}
+
+impl OrbitalResource for DimensionResource {
+    fn path(&self) -> Option<String> {
+        Some(format!("orbital://{}/dimensions", self.id))
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+        unsafe {
+            if buf.len() >= mem::size_of::<[u64;2]>() {
+                let dimensions: [u64;2] = [(*self.window_ptr).size.width as u64, (*self.window_ptr).size.height as u64];
+                ptr::write(buf.as_ptr() as *mut [u64;2], dimensions);
+                (*self.window_ptr).resize(Size::new(dimensions[0] as usize, dimensions[1] as usize));
+                Some(mem::size_of::<[u64;2]>())
+            } else {
+                None
+            }
+        }
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Option<usize> {
+        unsafe {
+            if buf.len() >= mem::size_of::<[u64;2]>() {
+                let dimensions: [u64;2] = ptr::read(buf.as_ptr() as *const [u64;2]);
+                (*self.window_ptr).resize(Size::new(dimensions[0] as usize, dimensions[1] as usize));
+                Some(mem::size_of::<[u64;2]>())
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Window resource
 pub struct WindowResource {
     pub content: Rc<UnsafeCell<Box<OrbitalResource>>>,
     pub title: Rc<UnsafeCell<Box<OrbitalResource>>>,
     pub events: Rc<UnsafeCell<Box<OrbitalResource>>>,
+    pub dimensions: Rc<UnsafeCell<Box<OrbitalResource>>>,
     pub id: u64,
     window: Box<Window>,
 }
@@ -192,11 +226,17 @@ impl WindowResource {
                 window_ptr: window.deref_mut(),
                 id: id,
             };
+        let dimensions = 
+            box DimensionResource {
+                window_ptr: window.deref_mut(),
+                id: id,
+            };
         box WindowResource {
             window: window,
             content: Rc::new(UnsafeCell::new(content)),
             title: Rc::new(UnsafeCell::new(title)),
             events: Rc::new(UnsafeCell::new(events)),
+            dimensions: Rc::new(UnsafeCell::new(dimensions)),
             id: id,
         }
     }

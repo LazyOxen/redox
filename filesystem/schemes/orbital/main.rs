@@ -1,5 +1,5 @@
+//#![feature(rc_counts)]
 use std::{Box, String, Url};
-use std::{cmp, mem, ptr};
 use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 use std::get_slice::GetSlice;
@@ -8,14 +8,13 @@ use std::ops::DerefMut;
 use std::process::Command;
 use std::rc::Rc;
 use std::to_num::ToNum;
-use std::u64;//::{MAX};
+use std::u64;
 
 use orbital::event::Event;
 use orbital::Point;
 use orbital::Size;
 
 use self::session::Session;
-use self::window::Window;
 use self::resources::*;
 
 pub mod display;
@@ -26,30 +25,24 @@ pub mod session;
 pub mod window;
 
 pub static mut session_ptr: *mut Session = 0 as *mut Session;
+pub static mut windows_map: *mut BTreeMap<u64, Rc<UnsafeCell<Box<OrbitalResource>>>> = 0 as *mut BTreeMap<u64, Rc<UnsafeCell<Box<OrbitalResource>>>>;
 
 /// A resource
 pub struct Resource {
     pub resource: Rc<UnsafeCell<Box<OrbitalResource>>>,
+    pub id: u64,
 }
 
 impl Resource {
-    pub fn new (resource: Rc<UnsafeCell<Box<OrbitalResource>>>) -> Box<Self> {
+    pub fn new (resource: Rc<UnsafeCell<Box<OrbitalResource>>>, id: u64) -> Box<Self> {
         box Resource { 
             resource: resource,
+            id: id,
         }
     }
 
     pub fn dup(&self) -> Option<Box<Resource>> {
-        unsafe {
-            match (*self.resource.get()).dup() {
-                Some(r) => {
-                    Some(box Resource {
-                            resource: Rc::new(UnsafeCell::new(r)),
-                           })
-                },
-                None => None
-            }
-        }
+        None
     }
 
     pub fn path(&self) -> Option<String> {
@@ -87,6 +80,26 @@ impl Resource {
     }
 }
 
+impl Drop for Resource {
+    fn drop(&mut self) {
+        unsafe {
+            let reenable = scheduler::start_no_ints();
+            // TODO: check the reference count before dropping
+            //       this will drop the window even if the user is just dropping
+            //       the title or some other resource
+            // LazyOxen
+            /*
+            let count = Rc::strong_count(&(*windows_map)[&self.id]);
+            println!("ref count: {}", count);
+            if count == 1 {
+                (*windows_map).remove(&self.id);
+            }
+            */
+            (*windows_map).remove(&self.id);
+            scheduler::end_no_ints(reenable);
+        }
+    }
+}
 /// A window scheme
 pub struct Scheme {
     pub session: Box<Session>,
@@ -118,7 +131,10 @@ impl Scheme {
             next_window_id: 1,
             windows: BTreeMap::new(),
         };
-        unsafe { session_ptr = ret.session.deref_mut() };
+        unsafe { 
+            session_ptr = ret.session.deref_mut();
+            windows_map = &ret.windows as *const _ as  *mut BTreeMap<u64, Rc<UnsafeCell<Box<OrbitalResource>>>>;
+        }
         ret
     }
 
@@ -178,7 +194,11 @@ impl Scheme {
                                                                              title, 
                                                                              id)));
                     self.windows.insert(id, window.clone());
-                    let resource = box Resource { resource: window };
+                    let resource = 
+                        box Resource { 
+                            resource: window,
+                            id: id,
+                        };
                     Some(resource)
                 },
                 None => None,
@@ -217,21 +237,28 @@ impl Scheme {
             let path = url.path_parts();
             if let Some(property) = path.get(0) {
                 unsafe {
-                    match &property[..] {
-                        "content" => Some(Resource::new(
-                                (*(window.get() as *mut Box<WindowResource>))
-                                    .content.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>)),
-                        "title" => Some(Resource::new(
-                                (*(window.get() as *mut Box<WindowResource>))
-                                    .title.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>)),
-                        "events" => Some(Resource::new(
-                                (*(window.get() as *mut Box<WindowResource>))
-                                    .events.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>)),
-                        _ => None
-                    }
+                    //let reenable = scheduler::start_no_ints();
+                    let resource =
+                        match &property[..] {
+                            "content" => Some(Resource::new(
+                                    (*(window.get() as *mut Box<WindowResource>))
+                                        .content.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
+                            "title" => Some(Resource::new(
+                                    (*(window.get() as *mut Box<WindowResource>))
+                                        .title.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
+                            "events" => Some(Resource::new(
+                                    (*(window.get() as *mut Box<WindowResource>))
+                                        .events.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
+                            "dimensions" => Some(Resource::new(
+                                    (*(window.get() as *mut Box<WindowResource>))
+                                        .dimensions.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
+                            _ => None
+                        };
+                    //scheduler::end_no_ints(reenable);
+                    resource
                 }
             } else {
-                Some(Resource::new(window))
+                Some(Resource::new(window, id))
             }
         } else {
             None

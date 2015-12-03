@@ -2,6 +2,7 @@ use std::Box;
 use std::fs::File;
 use std::io::*;
 use std::mem;
+use std::ptr;
 use std::slice;
 use std::syscall::sys_yield;
 use std::String;
@@ -32,6 +33,8 @@ pub struct Window {
     content: File,
     /// Window events resource
     events: File,
+    /// Window dimensions resource
+    dimensions: File,
     /// Font file
     font: Vec<u8>,
     /// Window data
@@ -53,12 +56,15 @@ impl Window {
                 let _title = &format!("{}title", window_path);
                 let _content = &format!("{}content", window_path);
                 let _events = &format!("{}events", window_path);
+                let _dimensions= &format!("{}dimensions", window_path);
                 let title_file = File::open(_title);
                 let content_file = File::open(_content);
                 let events_file = File::open(_events);
+                let dimensions_file = File::open(_dimensions);
                 if title_file.is_some() && 
                    content_file.is_some() &&
-                   events_file.is_some() {
+                   events_file.is_some() &&
+                   dimensions_file.is_some() {
                     Some(box Window {
                         x: x,
                         y: y,
@@ -69,6 +75,7 @@ impl Window {
                         title_: title_file.unwrap(),
                         content: content_file.unwrap(),
                         events: events_file.unwrap(),
+                        dimensions: dimensions_file.unwrap(),
                         font: font,
                         data: vec![0; w * h * 4],
                     })
@@ -110,6 +117,22 @@ impl Window {
     //TODO: Sync with window movements
     pub fn y(&self) -> isize {
         self.y
+    }
+
+    pub fn size(&mut self) -> [u64;2] {
+        let mut dims: Vec<u8> = Vec::new();
+        self.dimensions.read_to_end(&mut dims);
+        unsafe { ptr::read((&dims).as_ptr() as *const [u64;2]) }
+    }
+
+    pub fn resize(&mut self, width: u64, height: u64) {
+        let dims = [width, height];
+        self.w = width as usize;
+        self.h = height as usize;
+        self.data.resize( (width*height*4) as usize, 0);
+        unsafe {
+           self.dimensions.write(&mem::transmute::<[u64; 2], [u8; 16]>(dims)[..]);
+        }
     }
 
     /// Get width

@@ -66,6 +66,10 @@ impl Window {
         ret
     }
 
+    pub fn resize(&mut self, size: Size) {
+        self.content = Display::new(size.width, size.height);
+        self.size = size;
+    }
     /// Poll the window (new)
     pub fn poll(&mut self) -> Option<Event> {
         let event_option;

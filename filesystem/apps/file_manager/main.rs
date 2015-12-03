@@ -315,13 +315,11 @@ impl FileManager {
             }
         }
         // TODO: HACK ALERT - should use resize whenver that gets added
-        self.window.sync_path();
-        self.window = Window::new(self.window.x(),
-                                  self.window.y(),
-                                  width.iter().sum(),
-                                  height,
-                                  &path)
-                          .unwrap();
+        let w :usize = width.iter().sum();
+        //println!("New dimensions: width: {} , height: {}", w, height);
+        self.window.resize(w as u64, height as u64);
+        println!("new path: {}", path);
+        self.window.set_title(&path);
         self.draw_content();
     }
 

@@ -193,7 +193,12 @@ impl Scheme {
                                                                              Size::new(size_width, size_height),
                                                                              title, 
                                                                              id)));
-                    self.windows.insert(id, window.clone());
+                    unsafe {
+                        let reenable = scheduler::start_no_ints();
+                        self.windows.insert(id, window.clone());
+                        scheduler::end_no_ints(reenable);
+                    }
+
                     let resource = 
                         box Resource { 
                             resource: window,
@@ -233,10 +238,12 @@ impl Scheme {
 
             None
         } else if let Ok(id) = host.parse::<u64>() {
-            let window = self.windows[&id].clone();
-            let path = url.path_parts();
-            if let Some(property) = path.get(0) {
-                unsafe {
+            unsafe {
+                let reenable = scheduler::start_no_ints();
+                let window = self.windows[&id].clone();
+                scheduler::end_no_ints(reenable);
+                let path = url.path_parts();
+                if let Some(property) = path.get(0) {
                     //let reenable = scheduler::start_no_ints();
                     let resource =
                         match &property[..] {
@@ -256,9 +263,9 @@ impl Scheme {
                         };
                     //scheduler::end_no_ints(reenable);
                     resource
+                } else {
+                    Some(Resource::new(window, id))
                 }
-            } else {
-                Some(Resource::new(window, id))
             }
         } else {
             None

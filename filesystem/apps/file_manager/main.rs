@@ -25,7 +25,6 @@ impl FileType {
             icon: load_icon(icon),
         }
     }
-
 }
 
 struct FileTypesInfo {
@@ -171,7 +170,9 @@ impl FileManager {
             self.window.image(0, 32 * row as isize, icon.width(), icon.height(), &icon);
 
             let mut col = 0;
+            println!("displaying file name:");
             for c in file_name.chars() {
+                println!("--|{}", c);
                 if c == '\n' {
                     col = 0;
                     row += 1;
@@ -248,16 +249,19 @@ impl FileManager {
 
     // TODO: would this make more sense in the fs module?
     fn get_parent_directory() -> Option<String> {
-        match File::open("../") {
-            Some(parent_dir) => parent_dir.path(),
-            None => None,
+        if let Ok(parent_dir) = File::open("../") {
+            if let Ok(path) = parent_dir.path() {
+                return Some(path.to_string());
+            }
         }
+
+        None
     }
 
     fn get_num_entries(path: &str) -> String {
         let count = match fs::read_dir(path) {
-            Some(entry_readdir) => entry_readdir.count(),
-            None => 0,
+            Ok(entry_readdir) => entry_readdir.count(),
+            Err(_) => 0,
         };
         if count == 1 {
             "1 entry".to_string()
@@ -269,56 +273,63 @@ impl FileManager {
     fn set_path(&mut self, path: &str) {
         let mut width = [48; 3];
         let mut height = 0;
-        fs::change_cwd(path);
-        if let Some(readdir) = fs::read_dir(path) {
+        println!("setting path to: {}", path);
+        env::set_current_dir(path);
+        if let Ok(readdir) = fs::read_dir(path) {
             self.files.clear();
             self.file_sizes.clear();
+            /*
+            self.files = Vec::new();
+            self.file_sizes = Vec::new();
+            */
             // check to see if parent directory exists
             if let Some(parent_dir) = FileManager::get_parent_directory() {
                 self.files.push("../".to_string());
                 self.file_sizes.push(FileManager::get_num_entries(&parent_dir));
             }
-            for entry in readdir {
-                self.files.push(entry.path().to_string());
-                self.file_sizes.push(// When the entry is a folder
-                                     if entry.path().ends_with('/') {
-                    FileManager::get_num_entries(&(path.to_string() + entry.path()))
-                } else {
-                    match File::open(&entry.path()) {
-                        Some(mut file) => match file.seek(SeekFrom::End(0)) {
-                            Some(size) => {
-                                if size >= 1_000_000_000 {
-                                    format!("{:.1} GB", (size as f64) / 1_000_000_000.0)
-                                } else if size >= 1_000_000 {
-                                    format!("{:.1} MB", (size as f64) / 1_000_000.0)
-                                } else if size >= 1_000 {
-                                    format!("{:.1} KB", (size as f64) / 1_000.0)
-                                } else {
-                                    format!("{:.1} bytes", size)
-                                }
-                            }
-                            None => "Failed to seek".to_string(),
-                        },
-                        None => "Failed to open".to_string(),
-                    }
-                });
-                // Unwrapping the last file size will not panic since it has
-                // been at least pushed once in the vector
-                let description = self.file_types_info.description_for(entry.path());
-                width[0] = cmp::max(width[0], 48 + (entry.path().len()) * 8);
-                width[1] = cmp::max(width[1], 8 + (self.file_sizes.last().unwrap().len()) * 8);
-                width[2] = cmp::max(width[2], 8 + (description.len()) * 8);
+            for entry_result in readdir {
+                if let Ok(entry) = entry_result {
+                    let entry_path = entry.path().to_string();
+                    println!("entry: {}", entry_path);
+                    self.files.push(entry_path.clone());
+                    self.file_sizes.push(// When the entry is a folder
+                                        if entry_path.ends_with('/') {
+                                            FileManager::get_num_entries(&(path.to_string() + &entry_path))
+                                        } else {
+                                            match File::open(&entry_path) {
+                                                Ok(mut file) => match file.seek(SeekFrom::End(0)) {
+                                                    Ok(size) => {
+                                                        if size >= 1_000_000_000 {
+                                                            format!("{:.1} GB", (size as f64) / 1_000_000_000.0)
+                                                        } else if size >= 1_000_000 {
+                                                            format!("{:.1} MB", (size as f64) / 1_000_000.0)
+                                                        } else if size >= 1_000 {
+                                                            format!("{:.1} KB", (size as f64) / 1_000.0)
+                                                        } else {
+                                                            format!("{:.1} bytes", size)
+                                                        }
+                                                    }
+                                                    Err(err) => format!("Failed to seek: {}", err)
+                                                },
+                                                Err(err) => format!("Failed to open: {}", err)
+                                            }
+                    });
+                    // Unwrapping the last file size will not panic since it has
+                    // been at least pushed once in the vector
+                    let description = self.file_types_info.description_for(&entry_path);
+                    println!("description: {}", description);
+                    width[0] = cmp::max(width[0], 48 + (entry_path.len()) * 8);
+                    width[1] = cmp::max(width[1], 8 + (self.file_sizes.last().unwrap().len()) * 8);
+                    width[2] = cmp::max(width[2], 8 + (description.len()) * 8);
+                }
             }
 
             if height < self.files.len() * 32 {
                 height = self.files.len() * 32;
             }
         }
-        // TODO: HACK ALERT - should use resize whenver that gets added
         let w :usize = width.iter().sum();
-        //println!("New dimensions: width: {} , height: {}", w, height);
         self.window.resize(w as u64, height as u64);
-        println!("new path: {}", path);
         self.window.set_title(&path);
         self.draw_content();
     }
@@ -469,14 +480,12 @@ impl FileManager {
                 self.draw_content();
             }
         }
-
     }
 }
 
-#[no_mangle]
-pub fn main() {
-    match env::args().get(1) {
+#[no_mangle] pub fn main() {
+    match env::args().nth(1) {
         Some(arg) => FileManager::new().main(arg),
-        None => FileManager::new().main("file:/"),
+        None => FileManager::new().main("file:/home/"),
     }
 }

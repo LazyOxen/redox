@@ -1,11 +1,17 @@
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut, Drop};
 
-use scheduler;
+pub static mut intex_count: usize = 0;
 
 /// An Intex, interrupt exclusion during value usage
 pub struct Intex<T: ?Sized> {
     value: UnsafeCell<T>,
+}
+
+impl Intex<()> {
+    pub fn static_lock() -> StaticIntexGuard {
+        StaticIntexGuard
+    }
 }
 
 impl<T> Intex<T> {
@@ -18,7 +24,7 @@ impl<T> Intex<T> {
 impl<T: ?Sized> Intex<T> {
     /// Lock the Intex
     pub fn lock(&self) -> IntexGuard<T> {
-        IntexGuard::new(unsafe { scheduler::start_no_ints() }, &self.value)
+        IntexGuard::new(&self.value)
     }
 }
 
@@ -28,14 +34,14 @@ unsafe impl<T: ?Sized + Send> Sync for Intex<T> { }
 
 /// A Intex guard (returned by .lock())
 pub struct IntexGuard<'a, T: ?Sized + 'a> {
-    reenable: bool,
+    inner: StaticIntexGuard,
     data: &'a UnsafeCell<T>,
 }
 
 impl<'intex, T: ?Sized> IntexGuard<'intex, T> {
-    fn new(reenable: bool, data: &'intex UnsafeCell<T>) -> Self {
+    fn new(data: &'intex UnsafeCell<T>) -> Self {
         IntexGuard {
-            reenable: reenable,
+            inner: StaticIntexGuard::new(),
             data: data,
         }
     }
@@ -55,8 +61,26 @@ impl<'intex, T: ?Sized> DerefMut for IntexGuard<'intex, T> {
     }
 }
 
-impl<'a, T: ?Sized> Drop for IntexGuard<'a, T> {
+/// A Static Intex guard (returned by .static_lock())
+pub struct StaticIntexGuard;
+
+impl StaticIntexGuard {
+    fn new() -> Self {
+        unsafe {
+            asm!("cli");
+            intex_count += 1;
+        }
+        StaticIntexGuard
+    }
+}
+
+impl Drop for StaticIntexGuard {
     fn drop(&mut self) {
-        unsafe { scheduler::end_no_ints(self.reenable) };
+        unsafe {
+            intex_count -= 1;
+            if intex_count == 0 {
+                //asm!("sti");
+            }
+        }
     }
 }

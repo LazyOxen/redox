@@ -53,12 +53,13 @@ impl Session {
             redraw: true,
         };
 
-        if let Some(mut file) = File::open("file:/ui/unifont.font") {
-            let mut vec = Vec::new();
-            file.read_to_end(&mut vec);
-            ret.font = vec;
-        } else {
-            println!("Failed to read font");
+        match File::open("file:/ui/unifont.font") {
+            Ok(mut file) => {
+                let mut vec = Vec::new();
+                file.read_to_end(&mut vec);
+                ret.font = vec;
+            },
+            Err(err) => println!("Failed to open font: {}", err)
         }
 
         ret.cursor = BmpFile::from_path("file:/ui/cursor.bmp");
@@ -72,19 +73,20 @@ impl Session {
             println!("Failed to read background");
         }
 
-        if let Some(mut file) = File::open("file:/apps/") {
-            let mut string = String::new();
-            file.read_to_string(&mut string);
+        match File::open("file:/apps/") {
+            Ok(mut file) => {
+                let mut string = String::new();
+                file.read_to_string(&mut string);
 
-            for folder in string.lines() {
-                if folder.ends_with('/') {
-                    ret.packages
-                       .push(Package::from_url(&Url::from_string("file:/apps/".to_string() +
-                                                                 &folder)));
+                for folder in string.lines() {
+                    if folder.ends_with('/') {
+                        ret.packages
+                           .push(Package::from_url(&Url::from_string("file:/apps/".to_string() +
+                                                                     &folder)));
+                    }
                 }
-            }
-        } else {
-            println!("Failed to open apps")
+            },
+            Err(err) => println!("Failed to open apps: {}", err)
         }
 
         ret
@@ -202,18 +204,21 @@ impl Session {
                 }
             }
         } else {
+            let mut active_window = true;
             for reverse_i in 0..self.windows.len() {
                 let i = self.windows.len() - 1 - reverse_i;
                 match self.windows.get(i) {
                     Some(window_ptr) => unsafe {
-                        if (**window_ptr).on_mouse(mouse_event, catcher < 0) {
+                        if (**window_ptr).on_mouse(mouse_event, catcher < 0, active_window) {
                             catcher = i as isize;
 
                             self.redraw = true;
+                            break;
                         }
                     },
                     None => (),
                 }
+                active_window = false;
             }
         }
 

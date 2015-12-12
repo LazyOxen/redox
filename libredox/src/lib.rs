@@ -17,7 +17,6 @@
 #![feature(core)]
 #![feature(core_intrinsics)]
 #![feature(core_panic)]
-#![feature(core_simd)]
 #![feature(int_error_internals)]
 #![feature(lang_items)]
 #![feature(macro_reexport)]
@@ -70,8 +69,6 @@
     pub use core::ops;
     pub use core::ptr;
     pub use core::raw;
-    #[allow(deprecated)]
-    pub use core::simd;
     pub use core::result;
     pub use core::option;
     pub mod error;
@@ -100,8 +97,6 @@
     #[prelude_import]
     pub mod prelude;
 
-
-
     /* Primitive types */
 
     // NB: slice and str are primitive types too, but their module docs + primitive
@@ -120,17 +115,15 @@
     pub use core::u32;
     pub use core::u64;
 
-    // TODO: Add methods to f64
     pub use core::num;
-
-    //TODO #[path = "num/f32.rs"]   pub mod f32;
-    //TODO #[path = "num/f64.rs"]   pub mod f64;
+    //#[path = "num/f32.rs"]   pub mod f32;
+    //#[path = "num/f64.rs"]   pub mod f64;
 
     pub mod ascii;
 
     /* Common traits */
 
-    pub mod floating_num;
+    //pub mod num;
 
     /* Runtime and platform support */
 
@@ -145,7 +138,7 @@
     pub mod io;
     pub mod net;
     // TODO pub mod os;
-    // TODO pub mod path;
+    pub mod path;
     pub mod process;
     pub mod sync;
     pub mod time;
@@ -195,8 +188,6 @@
     /// A module for necessary C and assembly constructs
     #[path="../../kernel/externs.rs"]
     pub mod externs;
-
-    pub mod start;
 
     /// A module for system calls
     pub mod syscall;

@@ -6,11 +6,10 @@ use std::*;
 
 use orbital::*;
 
-#[no_mangle]
-pub fn main() {
-    let url = match args().get(1) {
+#[no_mangle] pub fn main() {
+    let url = match env::args().nth(1) {
         Some(arg) => arg.clone(),
-        None => "none://",
+        None => "none:",
     };
 
     let bmp = BmpFile::from_path(url);

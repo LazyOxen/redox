@@ -7,6 +7,8 @@ use std::io::*;
 use std::ops::DerefMut;
 use std::process::Command;
 use std::rc::Rc;
+use std::syscall::SysError;
+use std::syscall::ENOENT;
 use std::to_num::ToNum;
 use std::u64;
 
@@ -41,39 +43,39 @@ impl Resource {
         }
     }
 
-    pub fn dup(&self) -> Option<Box<Resource>> {
-        None
+    pub fn dup(&self) -> Result<Box<Resource>> {
+       Err(SysError::new(ENOENT))
     }
 
-    pub fn path(&self) -> Option<String> {
+    pub fn path(&self) -> Result<String> {
         unsafe {
             (*self.resource.get()).path()
         }
     }
 
     /// Read from resource
-    pub fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         unsafe {
             (*self.resource.get()).read(buf)
         }
     }
 
     /// Write to resource
-    pub fn write(&mut self, buf: &[u8]) -> Option<usize> {
+    pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
         unsafe {
             (*self.resource.get()).write(buf)
         }
     }
 
     /// Seek
-    pub fn seek(&mut self, pos: SeekFrom) -> Option<usize> {
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         unsafe {
             (*self.resource.get()).seek(pos)
         }
     }
 
-    /// Sync the resource, should flip
-    pub fn sync(&mut self) -> bool {
+    /// Sync the resource
+    pub fn sync(&mut self) -> Result<()> {
         unsafe {
             (*self.resource.get()).sync()
         }
@@ -138,7 +140,7 @@ impl Scheme {
         ret
     }
 
-    pub fn open(&mut self, url_str: &str, _: usize) -> Option<Box<Resource>> {
+    pub fn open(&mut self, url_str: &str, _: usize) -> Result<Box<Resource>> {
         // window://host/path/path/path is the path type we're working with.
         let url = Url::from_str(url_str);
 
@@ -204,9 +206,9 @@ impl Scheme {
                             resource: window,
                             id: id,
                         };
-                    Some(resource)
+                    Ok(resource)
                 },
-                None => None,
+                None => Err(SysError::new(ENOENT)),
             }
         } else if host == "launch" {
             let path = url.path();
@@ -235,8 +237,7 @@ impl Scheme {
 
                 scheduler::end_no_ints(reenable);
             }
-
-            None
+            Err(SysError::new(ENOENT))
         } else if let Ok(id) = host.parse::<u64>() {
             unsafe {
                 let reenable = scheduler::start_no_ints();
@@ -244,31 +245,29 @@ impl Scheme {
                 scheduler::end_no_ints(reenable);
                 let path = url.path_parts();
                 if let Some(property) = path.get(0) {
-                    //let reenable = scheduler::start_no_ints();
                     let resource =
                         match &property[..] {
-                            "content" => Some(Resource::new(
+                            "content" => Ok(Resource::new(
                                     (*(window.get() as *mut Box<WindowResource>))
                                         .content.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
-                            "title" => Some(Resource::new(
+                            "title" => Ok(Resource::new(
                                     (*(window.get() as *mut Box<WindowResource>))
                                         .title.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
-                            "events" => Some(Resource::new(
+                            "events" => Ok(Resource::new(
                                     (*(window.get() as *mut Box<WindowResource>))
                                         .events.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
-                            "dimensions" => Some(Resource::new(
+                            "dimensions" => Ok(Resource::new(
                                     (*(window.get() as *mut Box<WindowResource>))
                                         .dimensions.clone() as Rc<UnsafeCell<Box<OrbitalResource>>>, id)),
-                            _ => None
+                            _ => Err(SysError::new(ENOENT))
                         };
-                    //scheduler::end_no_ints(reenable);
                     resource
                 } else {
-                    Some(Resource::new(window, id))
+                    Ok(Resource::new(window, id))
                 }
             }
         } else {
-            None
+            Err(SysError::new(ENOENT))
         }
     }
 

@@ -31,10 +31,9 @@ use collections::string::{String, ToString};
 use collections::vec::Vec;
 
 use core::cell::UnsafeCell;
-use core::{mem, usize};
+use core::{ptr, mem, usize};
 use core::slice::SliceExt;
 
-use common::debug;
 use common::event::{self, EVENT_KEY, EventOption};
 use common::memory;
 use common::paging::Page;
@@ -56,7 +55,7 @@ use programs::executor::execute;
 use programs::scheme::*;
 
 use scheduler::{Context, Regs, TSS};
-use scheduler::context::{context_enabled, context_switch, context_i, context_pid};
+use scheduler::context::context_switch;
 
 use schemes::Url;
 use schemes::arp::*;
@@ -103,12 +102,16 @@ pub mod syscall;
 /// USB input/output
 pub mod usb;
 
-pub static mut tss_ptr: *mut TSS = 0 as *mut TSS;
-
-pub static mut env_ptr: *mut Environment = 0 as *mut Environment;
+pub static mut TSS_PTR: Option<&'static mut TSS> = None;
+pub static mut ENV_PTR: Option<&'static mut Environment> = None;
 
 pub fn env() -> &'static Environment {
-    unsafe { &*env_ptr }
+    unsafe {
+        match ENV_PTR {
+            Some(&mut ref p) => p,
+            None => unreachable!(),
+        }
+    }
 }
 
 /// Pit duration
@@ -127,12 +130,11 @@ unsafe fn idle_loop() -> ! {
         {
             let contexts = ::env().contexts.lock();
             for i in 1..contexts.len() {
-                match contexts.get(i) {
-                    Some(context) => if context.interrupted {
+                if let Some(context) = contexts.get(i) {
+                    if context.interrupted {
                         halt = false;
                         break;
-                    },
-                    None => (),
+                    }
                 }
             }
         }
@@ -159,6 +161,11 @@ fn poll_loop() -> ! {
 
 /// Event loop
 fn event_loop() -> ! {
+    {
+        let mut console = env().console.lock();
+        console.instant = false;
+    }
+
     let mut cmd = String::new();
     loop {
         loop {
@@ -202,14 +209,12 @@ fn event_loop() -> ! {
                         } else {
                             // TODO: Magical orbital hack
                             unsafe {
-                                let reenable = scheduler::start_no_ints();
                                 for scheme in env().schemes.iter() {
                                     if (*scheme.get()).scheme() == "orbital" {
                                         (*scheme.get()).event(&event);
                                         break;
                                     }
                                 }
-                                scheduler::end_no_ints(reenable);
                             }
                         }
                     }
@@ -220,11 +225,10 @@ fn event_loop() -> ! {
 
         {
             let mut console = env().console.lock();
-            if console.draw {
-                if console.redraw {
-                    console.redraw = false;
-                    console.display.flip();
-                }
+            console.instant = false;
+            if console.draw && console.redraw {
+                console.redraw = false;
+                console.display.flip();
             }
         }
 
@@ -234,108 +238,120 @@ fn event_loop() -> ! {
 
 /// Initialize kernel
 unsafe fn init(font_data: usize, tss_data: usize) {
+    //Make sure interrupts are disabled
+    asm!("cli" : : : : "intel", "volatile");
+
+    //Zero BSS, this initializes statics that are set to 0
+    {
+        extern {
+            static mut __bss_start: u8;
+            static mut __bss_end: u8;
+        }
+
+        let start_ptr: *mut u8 = &mut __bss_start;
+        let end_ptr: *mut u8 = &mut __bss_end;
+
+        if start_ptr as usize <= end_ptr as usize {
+            let size = end_ptr as usize - start_ptr as usize;
+            memset(start_ptr, 0, size);
+        }
+    }
+
+    //Setup paging, this allows for memory allocation
     Page::init();
     memory::cluster_init();
     // Unmap first page to catch null pointer errors (after reading memory map)
     Page::new(0).unmap();
 
     display::fonts = font_data;
-    tss_ptr = tss_data as *mut TSS;
+    TSS_PTR = Some(&mut *(tss_data as *mut TSS));
+    ENV_PTR = Some(&mut *Box::into_raw(Environment::new()));
 
-    env_ptr = Box::into_raw(Environment::new());
+    match ENV_PTR {
+        Some(ref mut env) => {
+            env.contexts.lock().push(Context::root());
+            env.console.lock().draw = true;
 
-    context_pid = 1;
-    context_i = 0;
-    context_enabled = false;
+            debug!("Redox {} bits\n", mem::size_of::<usize>() * 8);
 
-    let env = &mut *env_ptr;
-    env.contexts.lock().push(Context::root());
-    env.console.lock().draw = true;
+            *(env.clock_realtime.lock()) = Rtc::new().time();
 
-    debug!("Redox ");
-    debug::dd(mem::size_of::<usize>() * 8);
-    debug!(" bits");
-    debug::dl();
+            env.schemes.push(UnsafeCell::new(Ps2::new()));
+            env.schemes.push(UnsafeCell::new(Serial::new(0x3F8, 0x4)));
 
-    env.clock_realtime = Rtc::new().time();
+            pci_init(env);
 
-    env.schemes.push(UnsafeCell::new(Ps2::new()));
-    env.schemes.push(UnsafeCell::new(Serial::new(0x3F8, 0x4)));
+            env.schemes.push(UnsafeCell::new(DebugScheme::new()));
+            env.schemes.push(UnsafeCell::new(box ContextScheme));
+            env.schemes.push(UnsafeCell::new(box MemoryScheme));
+            // session.items.push(box RandomScheme);
+            // session.items.push(box TimeScheme);
 
-    pci_init(env);
+            env.schemes.push(UnsafeCell::new(box EthernetScheme));
+            env.schemes.push(UnsafeCell::new(box ArpScheme));
+            env.schemes.push(UnsafeCell::new(box IcmpScheme));
+            env.schemes.push(UnsafeCell::new(box IpScheme { arp: Vec::new() }));
+            // session.items.push(box DisplayScheme);
 
-    env.schemes.push(UnsafeCell::new(DebugScheme::new()));
-    env.schemes.push(UnsafeCell::new(box ContextScheme));
-    env.schemes.push(UnsafeCell::new(box MemoryScheme));
-    // session.items.push(box RandomScheme);
-    // session.items.push(box TimeScheme);
+            Context::spawn("kpoll".to_string(),
+            box move || {
+                poll_loop();
+            });
 
-    env.schemes.push(UnsafeCell::new(box EthernetScheme));
-    env.schemes.push(UnsafeCell::new(box ArpScheme));
-    env.schemes.push(UnsafeCell::new(box IcmpScheme));
-    env.schemes.push(UnsafeCell::new(box IpScheme { arp: Vec::new() }));
-    // session.items.push(box DisplayScheme);
+            Context::spawn("kevent".to_string(),
+            box move || {
+                event_loop();
+            });
 
-    Context::spawn("kpoll".to_string(),
-                   box move || {
-                       poll_loop();
-                   });
+            Context::spawn("karp".to_string(),
+            box move || {
+                ArpScheme::reply_loop();
+            });
 
-    Context::spawn("kevent".to_string(),
-                   box move || {
-                       event_loop();
-                   });
+            Context::spawn("kicmp".to_string(),
+            box move || {
+                IcmpScheme::reply_loop();
+            });
 
-    Context::spawn("karp".to_string(),
-                   box move || {
-                       ArpScheme::reply_loop();
-                   });
+            env.contexts.lock().enabled = true;
 
-    Context::spawn("kicmp".to_string(),
-                   box move || {
-                       IcmpScheme::reply_loop();
-                   });
+            if let Ok(mut resource) = Url::from_str("file:/schemes/").open() {
+                let mut vec: Vec<u8> = Vec::new();
+                resource.read_to_end(&mut vec);
 
-    context_enabled = true;
+                for folder in String::from_utf8_unchecked(vec).lines() {
+                    if folder.ends_with('/') {
+                        let scheme_item = SchemeItem::from_url(&Url::from_string("file:/schemes/"
+                                                                                 .to_string() +
+                                                                                 &folder));
 
-    if let Some(mut resource) = Url::from_str("file:/schemes/").open() {
-        let mut vec: Vec<u8> = Vec::new();
-        resource.read_to_end(&mut vec);
-
-        for folder in String::from_utf8_unchecked(vec).lines() {
-            if folder.ends_with('/') {
-                let scheme_item = SchemeItem::from_url(&Url::from_string("file:/schemes/"
-                                                                             .to_string() +
-                                                                         &folder));
-
-                let reenable = scheduler::start_no_ints();
-                env.schemes.push(UnsafeCell::new(scheme_item));
-                scheduler::end_no_ints(reenable);
+                        env.schemes.push(UnsafeCell::new(scheme_item));
+                    }
+                }
             }
-        }
+
+            Context::spawn("kinit".to_string(),
+            box move || {
+                {
+                    let wd_c = "file:/\0";
+                    do_sys_chdir(wd_c.as_ptr());
+
+                    let stdio_c = "debug:\0";
+                    do_sys_open(stdio_c.as_ptr(), 0);
+                    do_sys_open(stdio_c.as_ptr(), 0);
+                    do_sys_open(stdio_c.as_ptr(), 0);
+                }
+
+                execute(Url::from_str("file:/apps/login/main.bin"), Vec::new());
+                debug!("INIT: Failed to execute\n");
+
+                loop {
+                    context_switch(false);
+                }
+            });
+        },
+        None => unreachable!(),
     }
-
-    Context::spawn("kinit".to_string(),
-                   box move || {
-                       let wd_c = "file:/\0";
-                       do_sys_chdir(wd_c.as_ptr());
-
-                       let stdio_c = "debug:\0";
-                       do_sys_open(stdio_c.as_ptr(), 0);
-                       do_sys_open(stdio_c.as_ptr(), 0);
-                       do_sys_open(stdio_c.as_ptr(), 0);
-
-                       let path_string = "file:/apps/shell/main.bin";
-                       let path = Url::from_str(path_string);
-
-                       debug!("INIT: Executing {}\n", path_string);
-                       execute(path, Vec::new());
-                       debug!("INIT: Failed to execute\n");
-
-                       loop {
-                           context_switch(false);
-                       }
-                   });
 }
 
 #[cold]
@@ -345,8 +361,9 @@ unsafe fn init(font_data: usize, tss_data: usize) {
 pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
     macro_rules! exception_inner {
         ($name:expr) => ({
-            unsafe {
-                if let Some(context) = Context::current() {
+            {
+                let contexts = ::env().contexts.lock();
+                if let Some(context) = contexts.current() {
                     debugln!("PID {}: {}", context.pid, context.name);
                 }
             }
@@ -368,6 +385,15 @@ pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
                 asm!("mov $0, cr4" : "=r"(cr4) : : : "intel", "volatile");
             }
             debugln!("    CR0: {:08X}    CR2: {:08X}    CR3: {:08X}    CR4: {:08X}", cr0, cr2, cr3, cr4);
+
+            let sp = regs.sp as *const u32;
+            for y in -15..16 {
+                debug!("    {:>3}:", y * 8 * 4);
+                for x in 0..8 {
+                    debug!(" {:08X}", unsafe { ptr::read(sp.offset(-(x + y * 8))) });
+                }
+                debug!("\n");
+            }
         })
     };
 
@@ -376,7 +402,7 @@ pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
             exception_inner!($name);
 
             loop {
-                unsafe { do_sys_exit(usize::MAX) };
+                do_sys_exit(usize::MAX);
             }
         })
     };
@@ -395,7 +421,7 @@ pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
             debugln!("    ERR: {:08X}", error);
 
             loop {
-                unsafe { do_sys_exit(usize::MAX) };
+                do_sys_exit(usize::MAX);
             }
         })
     };
@@ -410,26 +436,28 @@ pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
 
     match interrupt {
         0x20 => {
-            unsafe {
-                let reenable = scheduler::start_no_ints();
+            {
+                let mut clock_monotonic = env().clock_monotonic.lock();
+                *clock_monotonic = *clock_monotonic + PIT_DURATION;
+            }
+            {
+                let mut clock_realtime = env().clock_realtime.lock();
+                *clock_realtime = *clock_realtime + PIT_DURATION;
+            }
 
-                let env = &mut *env_ptr;
-                env.clock_realtime = env.clock_realtime + PIT_DURATION;
-                env.clock_monotonic = env.clock_monotonic + PIT_DURATION;
-
-                scheduler::end_no_ints(reenable);
-
-                let switch = if let Some(mut context) = Context::current_mut() {
+            let switch = {
+                let mut contexts = ::env().contexts.lock();
+                if let Some(mut context) = contexts.current_mut() {
                     context.slices -= 1;
                     context.slice_total += 1;
                     context.slices == 0
                 } else {
                     false
-                };
-
-                if switch {
-                    context_switch(true);
                 }
+            };
+
+            if switch {
+                unsafe { context_switch(true) };
             }
         }
         0x21 => env().on_irq(0x1), // keyboard
@@ -446,7 +474,7 @@ pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
         0x2D => env().on_irq(0xD), //coprocessor
         0x2E => env().on_irq(0xE), //disk
         0x2F => env().on_irq(0xF), //disk
-        0x80 => if !unsafe { syscall_handle(regs) } {
+        0x80 => if ! syscall_handle(regs) {
             exception!("Unknown Syscall");
         },
         0xFF => {
@@ -454,7 +482,7 @@ pub extern "cdecl" fn kernel(interrupt: usize, mut regs: &mut Regs) {
                 init(regs.ax, regs.bx);
                 idle_loop();
             }
-        }
+        },
         0x0 => exception!("Divide by zero exception"),
         0x1 => exception!("Debug exception"),
         0x2 => exception!("Non-maskable interrupt"),

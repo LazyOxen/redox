@@ -4,6 +4,8 @@ use std::cell::UnsafeCell;
 use std::io::*;
 use std::ops::DerefMut;
 use std::rc::Rc;
+use std::syscall::SysError;
+use std::syscall::ENOENT;
 
 use orbital::event::Event;
 use orbital::Point;
@@ -13,28 +15,28 @@ use super::display::Display;
 use super::window::Window;
 
 pub trait OrbitalResource {
-    fn dup(&self) -> Option<Box<OrbitalResource>> {
-        None
+    fn dup(&self) -> Result<Box<OrbitalResource>> {
+        Err(SysError::new(ENOENT))
     }
 
-    fn path(&self) -> Option<String> {
-        None
+    fn path(&self) -> Result<String> {
+        Err(SysError::new(ENOENT))
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
-        None
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        Err(SysError::new(ENOENT))
     }
 
-    fn write(&mut self, buf: &[u8]) -> Option<usize> {
-        None
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        Err(SysError::new(ENOENT))
     }
 
-    fn seek(&mut self, pos: SeekFrom) -> Option<usize> {
-        None
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        Err(SysError::new(ENOENT))
     }
 
-    fn sync(&mut self) -> bool {
-        false
+    fn sync(&mut self) -> Result<()> {
+        Err(SysError::new(ENOENT))
     }
 }
 
@@ -50,18 +52,18 @@ pub struct ContentResource {
 
 impl OrbitalResource for ContentResource {
     /// Return the url of this resource
-    fn path(&self) -> Option<String> {
-        Some(format!("orbital://{}/content", self.id))
+    fn path(&self) -> Result<String> {
+        Ok(format!("orbital://{}/content", self.id))
     }
 
     /// Read from resource
     // TODO: implement this
-    fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
-        None
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        Err(SysError::new(ENOENT))
     }
 
     /// Write to resource
-    fn write(&mut self, buf: &[u8]) -> Option<usize> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
         unsafe {
             let content = &mut (*self.window_ptr).content;
 
@@ -69,29 +71,28 @@ impl OrbitalResource for ContentResource {
             Display::copy_run(buf.as_ptr() as usize, content.offscreen + self.seek, size);
             self.seek += size;
 
-            Some(size)
+            Ok(size)
         }
     }
     
     /// Seek
-    fn seek(&mut self, pos: SeekFrom) -> Option<usize> {
-        let end = unsafe { (*self.window_ptr).content.size }; 
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        let end = unsafe {(*self.window_ptr).content.size}; 
 
         self.seek = match pos {
-            SeekFrom::Start(offset) => cmp::min(end, cmp::max(0, offset)),
-            SeekFrom::Current(offset) =>
-                cmp::min(end, cmp::max(0, self.seek as isize + offset) as usize),
-            SeekFrom::End(offset) => cmp::min(end, cmp::max(0, end as isize + offset) as usize),
+            SeekFrom::Start(offset) => cmp::min(end as u64, cmp::max(0, offset)) as usize,
+            SeekFrom::Current(offset) => cmp::min(end as i64, cmp::max(0, self.seek as i64 + offset)) as usize,
+            SeekFrom::End(offset) => cmp::min(end as i64, cmp::max(0, end as i64 + offset)) as usize,
         };
 
-        return Some(self.seek);
+        Ok(self.seek as u64)
     }
 
     /// Sync the resource, should flip
-    fn sync(&mut self) -> bool {
+    fn sync(&mut self) -> Result<()> {
         unsafe {
             (*self.window_ptr).redraw();
-            true
+            Ok(())
         }
     }
 }
@@ -104,11 +105,11 @@ pub struct TitleResource {
 }
 
 impl OrbitalResource for TitleResource {
-    fn path(&self) -> Option<String> {
-        Some(format!("orbital://{}/title",self.id))
+    fn path(&self) -> Result<String> {
+        Ok(format!("orbital://{}/title",self.id))
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         unsafe {
             let title = (*self.window_ptr).title.clone();
             let bytes_to_read = title.len();
@@ -116,17 +117,17 @@ impl OrbitalResource for TitleResource {
                 for (src, dest) in title.bytes().zip(buf.iter_mut()) {
                     *dest = src;
                 }
-                Some(bytes_to_read)
+                Ok(bytes_to_read)
             } else {
-                None
+                Err(SysError::new(ENOENT))
             }
         }
     }
 
-    fn write(&mut self, buf: &[u8]) -> Option<usize> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
         unsafe {
             (*self.window_ptr).title = String::from_utf8_lossy(buf).replace("\u{FFFD}","?");
-            Some(buf.len())
+            Ok(buf.len())
         }
     }
 }
@@ -138,11 +139,11 @@ pub struct EventResource {
 }
 
 impl OrbitalResource for EventResource {
-    fn path(&self) -> Option<String> {
-        Some(format!("orbital://{}/events", self.id))
+    fn path(&self) -> Result<String> {
+        Ok(format!("orbital://{}/events", self.id))
     }
 
-    fn read(&mut self, buf: &mut[u8]) -> Option<usize> {
+    fn read(&mut self, buf: &mut[u8]) -> Result<usize> {
         unsafe {
             //Read events from window
             let mut i = 0;
@@ -155,7 +156,7 @@ impl OrbitalResource for EventResource {
                     None => break,
                 }
             }
-            Some(i)
+            Ok(i)
         }
     }
 }
@@ -167,31 +168,31 @@ pub struct DimensionResource {
 }
 
 impl OrbitalResource for DimensionResource {
-    fn path(&self) -> Option<String> {
-        Some(format!("orbital://{}/dimensions", self.id))
+    fn path(&self) -> Result<String> {
+        Ok(format!("orbital://{}/dimensions", self.id))
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         unsafe {
             if buf.len() >= mem::size_of::<[u64;2]>() {
                 let dimensions: [u64;2] = [(*self.window_ptr).size.width as u64, (*self.window_ptr).size.height as u64];
                 ptr::write(buf.as_ptr() as *mut [u64;2], dimensions);
                 (*self.window_ptr).resize(Size::new(dimensions[0] as usize, dimensions[1] as usize));
-                Some(mem::size_of::<[u64;2]>())
+                Ok(mem::size_of::<[u64;2]>())
             } else {
-                None
+                Err(SysError::new(ENOENT))
             }
         }
     }
 
-    fn write(&mut self, buf: &[u8]) -> Option<usize> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
         unsafe {
             if buf.len() >= mem::size_of::<[u64;2]>() {
                 let dimensions: [u64;2] = ptr::read(buf.as_ptr() as *const [u64;2]);
                 (*self.window_ptr).resize(Size::new(dimensions[0] as usize, dimensions[1] as usize));
-                Some(mem::size_of::<[u64;2]>())
+                Ok(mem::size_of::<[u64;2]>())
             } else {
-                None
+                Err(SysError::new(ENOENT))
             }
         }
     }
@@ -243,8 +244,8 @@ impl WindowResource {
 }
 
 impl OrbitalResource for WindowResource {
-    fn path(&self) -> Option<String> {
-        Some(format!("orbital://{}/", self.id))
+    fn path(&self) -> Result<String> {
+        Ok(format!("orbital://{}/", self.id))
     }
 
     // TODO: maybe read could return information about the window?
